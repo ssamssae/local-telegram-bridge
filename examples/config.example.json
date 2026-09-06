@@ -1,0 +1,29 @@
+{
+  "owner_id": 123456789,
+  "token_env": "TELEGRAM_BOT_TOKEN",
+  "state_file": "~/.local/state/local-telegram-bridge/state.json",
+  "default_profile": "20b",
+  "history_turns": 6,
+  "max_tokens": 1024,
+  "unload_other_profiles": true,
+  "profiles": {
+    "20b": {
+      "provider": "ollama",
+      "label": "Ollama · gpt-oss 20B",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "gpt-oss:20b",
+      "context_length": 4096,
+      "ttl_seconds": 60
+    },
+    "qwen": {
+      "provider": "lmstudio",
+      "label": "LM Studio · Qwen 27B",
+      "base_url": "http://127.0.0.1:1234",
+      "model": "qwen3.8-27b",
+      "lms_bin": "lms",
+      "start_app": true,
+      "context_length": 4096,
+      "ttl_seconds": 60
+    }
+  }
+}

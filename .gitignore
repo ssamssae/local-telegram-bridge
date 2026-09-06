@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+config.json
+*secret*
+*token*
+state/
+*.log
+*.lock
+*.tmp
+.DS_Store
