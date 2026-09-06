@@ -24,15 +24,19 @@ class SessionStore:
 
     def __init__(self, path):
         self.path = Path(path).expanduser().resolve()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.parent.chmod(0o700)
+        parent_existed = self.path.parent.exists()
+        self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        if not parent_existed:
+            self.path.parent.chmod(0o700)
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.close(fd)
+        self.path.chmod(0o600)
         self._initialize()
 
     def _connect(self):
         db = sqlite3.connect(str(self.path), timeout=30)
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA busy_timeout = 30000')
-        db.execute('PRAGMA journal_mode = WAL')
         db.execute('PRAGMA foreign_keys = ON')
         if self.path.exists():
             self.path.chmod(0o600)
@@ -52,6 +56,7 @@ class SessionStore:
 
     def _initialize(self):
         with self._connection() as db:
+            db.execute('PRAGMA journal_mode = WAL')
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS metadata (
                     key TEXT PRIMARY KEY,
@@ -293,6 +298,28 @@ class SessionStore:
                              (profile,)).fetchone()
             return row['value']
 
+    def terminal_snapshot(self, profile):
+        """Return startup history, unfinished inputs, and cursor from one read view."""
+        with self._connection() as db:
+            db.execute('BEGIN')
+            history_rows = db.execute(
+                'SELECT role, content FROM messages WHERE profile=? ORDER BY id',
+                (profile,)).fetchall()
+            pending_rows = db.execute('''
+                SELECT e.*, r.source_key FROM events e
+                JOIN requests r ON r.id=e.request_id
+                WHERE e.profile=? AND e.kind='user'
+                    AND r.status IN ('queued', 'running')
+                ORDER BY e.id
+            ''', (profile,)).fetchall()
+            cursor = db.execute(
+                'SELECT COALESCE(MAX(id), 0) AS value FROM events WHERE profile=?',
+                (profile,)).fetchone()['value']
+        history = [
+            {'role': row['role'], 'content': row['content']} for row in history_rows
+        ]
+        return history, [dict(row) for row in pending_rows], cursor
+
     def events_since(self, profile, event_id):
         with self._connection() as db:
             rows = db.execute('''
@@ -324,3 +351,8 @@ class SessionStore:
                     INSERT INTO messages(profile, role, content, created_at)
                     VALUES(?, ?, ?, ?)
                 ''', (profile, row['role'], row['content'], now))
+
+    def legacy_import_count(self, profile):
+        with self._connection() as db:
+            return db.execute('SELECT COUNT(*) AS value FROM legacy_imports WHERE profile=?',
+                              (profile,)).fetchone()['value']

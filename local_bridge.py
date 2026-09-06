@@ -110,6 +110,10 @@ def read_config(path):
     config.setdefault('state_file', '~/.local/state/local-telegram-bridge/state.json')
     state_parent = Path(config['state_file']).expanduser().parent
     config.setdefault('session_db', str(state_parent / 'sessions.sqlite3'))
+    if not isinstance(config['session_db'], str) or not config['session_db'].strip():
+        raise BridgeError('session_db must be a private SQLite file path')
+    if Path(config['session_db']).expanduser().resolve() == Path(config['state_file']).expanduser().resolve():
+        raise BridgeError('session_db and state_file must use different paths')
     config.setdefault('history_turns', 6)
     config.setdefault('max_tokens', 1024)
     config.setdefault('unload_other_profiles', False)
@@ -289,8 +293,9 @@ class Bridge:
             self.state['selected'] = config['fixed_profile']
         if self.state['selected'] not in config['profiles']:
             raise BridgeError('Saved profile missing from config; update the private state')
-        for name, rows in self.state['histories'].items():
-            if (rows and name in self.profiles and not self.store.history(name)
+        for name in self.profiles:
+            rows = self.state['histories'].get(name, [])
+            if (rows and not self.store.history(name)
                     and not self.store.latest_event_id(name)):
                 raise BridgeError('Legacy JSON history needs migrate_history.py before bridge startup')
         self._sync_history_state()
@@ -301,7 +306,7 @@ class Bridge:
     def _sync_history_state(self):
         # Compatibility snapshot only; SQLite is the shared source of truth.
         self.state['histories'] = {
-            name: self.store.history(name) for name in self.config['profiles']
+            name: self.store.history(name) for name in self.profiles
         }
 
     def flush(self):
@@ -481,9 +486,9 @@ class Bridge:
         retry = 1
         while True:
             try:
+                self.flush()
                 while self.process_pending():
                     self.flush()
-                self.flush()
                 updates = self.telegram.call('getUpdates', offset=self.state.get('offset', 0),
                                                timeout=1, allowed_updates=['message', 'callback_query'])
                 for update in updates or []:

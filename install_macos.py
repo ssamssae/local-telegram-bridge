@@ -31,6 +31,7 @@ def main():
     dest.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
     source_dir = Path(__file__).resolve().parent
+    bridge_target = dest / 'local_bridge.py'
     for name in ('local_bridge.py', 'session_store.py', 'terminal_chat.py',
                  'migrate_history.py'):
         source = source_dir / name
@@ -41,7 +42,7 @@ def main():
     plist = home / 'Library/LaunchAgents' / (label + '.plist')
     plist.parent.mkdir(parents=True, exist_ok=True)
     value = {'Label': label,
-             'ProgramArguments': [sys.executable, str(target), '--config', str(config)],
+             'ProgramArguments': [sys.executable, str(bridge_target), '--config', str(config)],
              'WorkingDirectory': str(home), 'RunAtLoad': True, 'KeepAlive': True,
              'ThrottleInterval': 10,
              'EnvironmentVariables': {'PYTHONUNBUFFERED': '1',

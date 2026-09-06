@@ -137,7 +137,7 @@ class BridgeTests(unittest.TestCase):
         self.submit(7, '20B only')
         self.assertEqual('20b', self.models.calls[-1][0])
         self.assertNotIn('keep Qwen history', json.dumps(self.models.calls[-1][1]))
-        self.assertEqual(2, len(self.bridge.state['histories']['qwen']))
+        self.assertEqual(2, len(self.bridge.store.history('qwen')))
         self.assertEqual('20b', lb.Bridge(self.config, self.telegram, self.models).state['selected'])
 
     def test_fixed_bot_old_buttons_cannot_change_binding(self):
