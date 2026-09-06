@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import fcntl
 import hashlib
 import json
@@ -19,6 +19,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from session_store import SessionStore, SessionStoreError
 
 
 class BridgeError(Exception):
@@ -106,6 +108,8 @@ def read_config(path):
             raise BridgeError('Each profile needs a model identifier')
         profile.setdefault('label', profile['model'])
     config.setdefault('state_file', '~/.local/state/local-telegram-bridge/state.json')
+    state_parent = Path(config['state_file']).expanduser().parent
+    config.setdefault('session_db', str(state_parent / 'sessions.sqlite3'))
     config.setdefault('history_turns', 6)
     config.setdefault('max_tokens', 1024)
     config.setdefault('unload_other_profiles', False)
@@ -264,9 +268,15 @@ class Typing:
 
 
 class Bridge:
-    def __init__(self, config, telegram, models):
+    def __init__(self, config, telegram, models, bridge_id=None, store=None):
         self.config, self.telegram, self.models = config, telegram, models
         self.state_path = Path(config['state_file']).expanduser()
+        config.setdefault('session_db', str(self.state_path.parent / 'sessions.sqlite3'))
+        self.store = store or SessionStore(config['session_db'])
+        fixed = config.get('fixed_profile')
+        self.profiles = [fixed] if fixed else list(config['profiles'])
+        self.bridge_id = bridge_id or hashlib.sha256(
+            str(self.state_path.resolve()).encode()).hexdigest()[:20]
         if self.state_path.exists():
             self.state = json.loads(self.state_path.read_text())
         else:
@@ -279,9 +289,19 @@ class Bridge:
             self.state['selected'] = config['fixed_profile']
         if self.state['selected'] not in config['profiles']:
             raise BridgeError('Saved profile missing from config; update the private state')
+        for name, rows in self.state['histories'].items():
+            if rows and name in config['profiles'] and not self.store.history(name):
+                raise BridgeError('Legacy JSON history needs migrate_history.py before bridge startup')
+        self._sync_history_state()
 
     def save(self):
         atomic_json(self.state_path, self.state)
+
+    def _sync_history_state(self):
+        # Compatibility snapshot only; SQLite is the shared source of truth.
+        self.state['histories'] = {
+            name: self.store.history(name) for name in self.config['profiles']
+        }
 
     def flush(self):
         while self.state['outbox']:
@@ -294,6 +314,18 @@ class Bridge:
             self.state['last_delivery'] = {'message_id': result['message_id'],
                                            'update_id': item['update_id'], 'at': time.time()}
             self.state['outbox'].pop(0)
+            self.save()
+        while True:
+            item = self.store.pending_outbox(self.profiles)
+            if not item:
+                break
+            result = self.telegram.call('sendMessage', chat_id=self.config['owner_id'],
+                                        text=item['text'])
+            if not isinstance(result, dict) or not result.get('message_id'):
+                raise BridgeError('Telegram delivery was not confirmed')
+            self.store.mark_sent(item['id'], result['message_id'])
+            self.state['last_delivery'] = {'message_id': result['message_id'],
+                                           'request_id': item['request_id'], 'at': time.time()}
             self.save()
 
     def help(self, selected):
@@ -321,11 +353,53 @@ class Bridge:
         # Commit generated replies and offset together BEFORE Telegram delivery.
         self.save()
 
+    def _request_deliveries(self, request, reply):
+        rows = []
+        if request['source'] == 'terminal':
+            shown = '/clear' if request['kind'] == 'clear' else request['content']
+            rows.extend(split_message('[Terminal]\n' + shown))
+        rows.extend(split_message(reply))
+        return rows
+
+    def process_pending(self):
+        request = self.store.claim(self.profiles)
+        if not request:
+            return False
+        selected = request['profile']
+        label = self.config['profiles'][selected]['label']
+        if request['kind'] == 'clear':
+            reply = label + ' · 새 대화를 시작합니다.'
+            self.store.complete_clear(request, reply,
+                                      self._request_deliveries(request, reply))
+        else:
+            history = self.store.history(selected, self.config['history_turns'])
+            prompt = self.config['profiles'][selected].get('system',
+                '한국어로 명확하고 간결하게 답하세요. 파일 편집이나 명령 실행 도구는 없습니다.')
+            messages = [{'role': 'system', 'content': prompt}] + history + [
+                {'role': 'user', 'content': request['content']}]
+            try:
+                if request['source'] == 'telegram':
+                    with Typing(self.telegram, self.config['owner_id']):
+                        answer = self.models.chat(selected, messages)
+                else:
+                    answer = self.models.chat(selected, messages)
+                reply = '[' + label + ']\n' + answer
+                self.store.complete_chat(request, answer, self.config['history_turns'],
+                                         self._request_deliveries(request, reply))
+            except (BridgeError, subprocess.SubprocessError) as error:
+                safe = str(error) if isinstance(error, BridgeError) else 'Local application could not start'
+                reply = ('응답 실패: ' + safe +
+                         '\n이번 질문은 대화에 저장하지 않았습니다. 다시 보내거나 /clear를 사용하세요.')
+                self.store.fail(request, reply, self._request_deliveries(request, reply))
+        self._sync_history_state()
+        self.save()
+        return True
+
     def handle(self, update):
         update_id = update.get('update_id')
         if not isinstance(update_id, int) or update_id < self.state.get('offset', 0):
             return
-        if self.state['outbox']:
+        if self.state['outbox'] or self.store.pending_outbox(self.profiles):
             raise BridgeError('Flush pending replies before accepting another update')
         following = copy.deepcopy(self.state)
         following['offset'] = update_id + 1
@@ -372,14 +446,18 @@ class Bridge:
         elif command in ('/start', '/help'):
             reply = self.help(selected)
         elif command == '/clear':
-            following['histories'][selected] = []
-            reply = self.config['profiles'][selected]['label'] + ' · 새 대화를 시작합니다.'
+            self.store.enqueue(selected, 'telegram', self.bridge_id + ':' + str(update_id),
+                               'clear', '')
+            self.state = following
+            self.save()
+            self.process_pending()
+            return
         elif command == '/new':
             reply = '새 대화 명령이 /clear로 바뀌었습니다. /clear를 보내주세요.'
         elif not fixed and command in ('/model', '/models'):
             reply, markup = self.model_picker(selected)
         elif command == '/status':
-            count = len(following['histories'].get(selected, [])) // 2
+            count = len(self.store.history(selected)) // 2
             reply = self.help(selected) + '\n저장된 대화: ' + str(count) + '턴'
         elif not fixed and command.startswith('/') and command[1:] in self.config['profiles']:
             selected = command[1:]
@@ -390,27 +468,20 @@ class Bridge:
         elif command.startswith('/'):
             reply = '알 수 없는 명령입니다. /help를 확인하세요.'
         else:
-            history = following['histories'].get(selected, [])
-            limit = max(1, int(self.config['history_turns'])) * 2
-            prompt = self.config['profiles'][selected].get('system',
-                '한국어로 명확하고 간결하게 답하세요. 파일 편집이나 명령 실행 도구는 없습니다.')
-            messages = [{'role': 'system', 'content': prompt}] + history[-limit:] + [
-                {'role': 'user', 'content': text}]
-            try:
-                with Typing(self.telegram, owner):
-                    answer = self.models.chat(selected, messages)
-                following['histories'][selected] = (history + [
-                    {'role': 'user', 'content': text}, {'role': 'assistant', 'content': answer}])[-limit:]
-                reply = '[' + self.config['profiles'][selected]['label'] + ']\n' + answer
-            except (BridgeError, subprocess.SubprocessError) as error:
-                safe = str(error) if isinstance(error, BridgeError) else 'Local application could not start'
-                reply = '응답 실패: ' + safe + '\n이번 질문은 대화에 저장하지 않았습니다. 다시 보내거나 /clear를 사용하세요.'
+            self.store.enqueue(selected, 'telegram', self.bridge_id + ':' + str(update_id),
+                               'chat', text)
+            self.state = following
+            self.save()
+            self.process_pending()
+            return
         self.queue_reply(following, update_id, reply, markup)
 
     def run(self):
         retry = 1
         while True:
             try:
+                while self.process_pending():
+                    self.flush()
                 self.flush()
                 updates = self.telegram.call('getUpdates', offset=self.state.get('offset', 0),
                                                timeout=25, allowed_updates=['message', 'callback_query'])
@@ -452,7 +523,13 @@ def main():
         if telegram.call('getWebhookInfo').get('url'):
             raise BridgeError('This bot has a webhook; remove it deliberately before long polling')
         print('Local Telegram bridge started: @' + identity['username'], flush=True)
-        Bridge(config, telegram, LocalModels(config)).run()
+        bridge = Bridge(config, telegram, LocalModels(config),
+                        bridge_id=hashlib.sha256(token.encode()).hexdigest()[:20])
+        with ExitStack() as workers:
+            for profile in bridge.profiles:
+                workers.enter_context(bridge.store.worker_lock(profile))
+            bridge.store.recover(bridge.profiles)
+            bridge.run()
 
 
 if __name__ == '__main__':
@@ -460,6 +537,6 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         pass
-    except (BridgeError, OSError, ValueError) as error:
+    except (BridgeError, SessionStoreError, OSError, ValueError) as error:
         print('bridge: ' + (str(error) if isinstance(error, BridgeError) else type(error).__name__), file=sys.stderr)
         sys.exit(1)

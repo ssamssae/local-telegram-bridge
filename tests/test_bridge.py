@@ -268,7 +268,7 @@ class BridgeTests(unittest.TestCase):
     def test_failed_inference_does_not_pollute_history(self):
         self.models.fail = True
         self.submit(1, 'fail')
-        self.assertEqual({}, self.bridge.state['histories'])
+        self.assertTrue(all(not rows for rows in self.bridge.state['histories'].values()))
         self.assertIn('응답 실패', self.telegram.sent[0])
 
     def test_outbox_recovers_without_regenerating_reply(self):
@@ -289,7 +289,7 @@ class BridgeTests(unittest.TestCase):
         with patch.object(self.telegram, 'call', return_value={}):
             with self.assertRaises(lb.BridgeError):
                 self.bridge.flush()
-        self.assertEqual(1, len(self.bridge.state['outbox']))
+        self.assertIsNotNone(self.bridge.store.pending_outbox(self.bridge.profiles))
 
     def test_duplicate_update_is_not_processed_again(self):
         self.submit(10, 'hello')

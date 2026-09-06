@@ -2,6 +2,7 @@
   "owner_id": 123456789,
   "token_env": "TELEGRAM_BOT_TOKEN",
   "state_file": "~/.local/state/local-telegram-bridge/state.json",
+  "session_db": "~/.local/state/local-telegram-bridge/sessions.sqlite3",
   "default_profile": "20b",
   "history_turns": 6,
   "max_tokens": 1024,
