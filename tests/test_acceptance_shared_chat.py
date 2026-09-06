@@ -2,9 +2,14 @@ import builtins
 import importlib.util
 import io
 import json
+import os
 from contextlib import redirect_stdout
 from pathlib import Path
 import plistlib
+import pty
+import select
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -48,6 +53,76 @@ class Models:
 
 
 class SharedChatAcceptanceTests(unittest.TestCase):
+    def test_pty_keeps_partial_input_while_telegram_turn_arrives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = {
+                'owner_id': 42,
+                'default_profile': 'qwen',
+                'fixed_profile': 'qwen',
+                'history_turns': 3,
+                'max_tokens': 64,
+                'unload_other_profiles': True,
+                'state_file': str(root / 'state.json'),
+                'session_db': str(root / 'sessions.sqlite3'),
+                'profiles': {
+                    'qwen': {
+                        'provider': 'lmstudio',
+                        'label': 'Qwen',
+                        'model': 'qwen',
+                        'base_url': 'http://127.0.0.1:1234',
+                    },
+                },
+            }
+            config_path = root / 'config.json'
+            config_path.write_text(json.dumps(config))
+            app = bridge.Bridge(config, Telegram(), Models(), bridge_id='qwen-bot')
+            master, slave = pty.openpty()
+            process = subprocess.Popen(
+                [sys.executable, str(ROOT / 'terminal_chat.py'),
+                 '--config', str(config_path)],
+                stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+            os.close(slave)
+            transcript = bytearray()
+
+            def read_until(needle, timeout=3):
+                deadline = time.monotonic() + timeout
+                while needle not in transcript and time.monotonic() < deadline:
+                    readable, _, _ = select.select([master], [], [], 0.05)
+                    if readable:
+                        transcript.extend(os.read(master, 4096))
+                return needle in transcript
+
+            try:
+                self.assertTrue(read_until('qwen › '.encode()), transcript.decode(errors='replace'))
+                os.write(master, b'partial input')
+                time.sleep(0.1)
+                app.handle({
+                    'update_id': 1,
+                    'message': {
+                        'text': 'async telegram question',
+                        'from': {'id': 42},
+                        'chat': {'id': 42, 'type': 'private'},
+                    },
+                })
+                self.assertTrue(
+                    read_until('Qwen › answer:async telegram question'.encode()),
+                    transcript.decode(errors='replace'))
+                self.assertIn(
+                    'Telegram › async telegram question'.encode(), transcript)
+                self.assertIn('qwen › partial input'.encode(), transcript)
+                process.kill()
+                process.wait(3)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(1)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(1)
+                os.close(master)
+
     def test_reconnecting_terminal_replays_queued_telegram_question_before_answer(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
