@@ -1,9 +1,12 @@
 import importlib.util
 import io
+import json
+from contextlib import redirect_stdout
 from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).parents[1]
 spec = importlib.util.spec_from_file_location('local_bridge_shared', ROOT / 'local_bridge.py')
@@ -12,6 +15,9 @@ spec.loader.exec_module(lb)
 terminal_spec = importlib.util.spec_from_file_location('terminal_chat', ROOT / 'terminal_chat.py')
 terminal = importlib.util.module_from_spec(terminal_spec)
 terminal_spec.loader.exec_module(terminal)
+migrate_spec = importlib.util.spec_from_file_location('migrate_history', ROOT / 'migrate_history.py')
+migrate = importlib.util.module_from_spec(migrate_spec)
+migrate_spec.loader.exec_module(migrate)
 
 
 class Telegram:
@@ -129,6 +135,24 @@ class SharedSessionTests(unittest.TestCase):
         self.assertEqual(0o600, Path(self.config['session_db']).stat().st_mode & 0o777)
         self.assertEqual(0o700, Path(self.config['session_db']).parent.stat().st_mode & 0o777)
 
+    def test_profile_worker_lock_rejects_second_processor(self):
+        with self.bridge.store.worker_lock('qwen'):
+            with self.assertRaises(lb.SessionStoreError):
+                with lb.SessionStore(self.config['session_db']).worker_lock('qwen'):
+                    self.fail('second worker lock unexpectedly acquired')
+
+    def test_legacy_json_history_requires_explicit_migration(self):
+        state = {'offset': 0, 'histories': {'qwen': [
+            {'role': 'user', 'content': 'old'},
+            {'role': 'assistant', 'content': 'answer'},
+        ]}, 'outbox': [], 'selected': 'qwen'}
+        legacy_config = dict(self.config,
+            state_file=str(Path(self.tmp.name) / 'legacy-state.json'),
+            session_db=str(Path(self.tmp.name) / 'empty.sqlite3'))
+        Path(legacy_config['state_file']).write_text(json.dumps(state))
+        with self.assertRaises(lb.BridgeError):
+            lb.Bridge(legacy_config, self.telegram, self.models)
+
 
 class ConsoleTests(unittest.TestCase):
     def test_async_event_restores_prompt_and_partial_input(self):
@@ -148,6 +172,59 @@ class ConsoleTests(unittest.TestCase):
                   'profiles': {'20b': {}, 'qwen': {}}}
         with self.assertRaises(terminal.BridgeError):
             terminal.choose_profile(config, '20b')
+
+
+class MigrationTests(unittest.TestCase):
+    def test_conflict_requires_preference_and_archives_both_sources(self):
+        telegram_rows = [{'role': 'user', 'content': 'telegram'},
+                         {'role': 'assistant', 'content': 'telegram answer'}]
+        terminal_rows = [{'role': 'user', 'content': 'terminal'},
+                         {'role': 'assistant', 'content': 'terminal answer'}]
+        candidates = [
+            {'kind': 'telegram', 'name': 'state.json', 'rows': telegram_rows},
+            {'kind': 'terminal', 'name': 'conversation.json', 'rows': terminal_rows},
+        ]
+        with self.assertRaises(migrate.BridgeError):
+            migrate.select_active('qwen', candidates, None)
+        self.assertEqual(terminal_rows,
+                         migrate.select_active('qwen', candidates, 'terminal'))
+        with tempfile.TemporaryDirectory() as directory:
+            store = lb.SessionStore(Path(directory) / 'sessions.sqlite3')
+            store.archive_and_replace('qwen', candidates, terminal_rows)
+            self.assertEqual(terminal_rows, store.history('qwen'))
+            self.assertEqual(2, store.legacy_import_count('qwen'))
+
+    def test_migration_rejects_incomplete_turns(self):
+        with self.assertRaises(migrate.BridgeError):
+            migrate.validate_rows([{'role': 'assistant', 'content': 'orphan'}], 'source')
+
+    def test_cli_dry_run_then_execute_seeds_shared_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = root / 'conversation.json'
+            rows = [{'role': 'user', 'content': 'old'},
+                    {'role': 'assistant', 'content': 'answer'}]
+            history.write_text(json.dumps(rows))
+            config = root / 'config.json'
+            config.write_text(json.dumps({
+                'owner_id': 42, 'default_profile': 'qwen',
+                'state_file': str(root / 'state.json'),
+                'session_db': str(root / 'sessions.sqlite3'),
+                'profiles': {'qwen': {'provider': 'lmstudio', 'model': 'qwen',
+                                      'base_url': 'http://127.0.0.1:1234'}},
+            }))
+            args = ['migrate_history.py', '--config', str(config),
+                    '--terminal-history', 'qwen=' + str(history)]
+            output = io.StringIO()
+            with patch.object(migrate.sys, 'argv', args), redirect_stdout(output):
+                migrate.main()
+            self.assertFalse((root / 'sessions.sqlite3').exists())
+            with patch.object(migrate.sys, 'argv', args + ['--execute']), \
+                    redirect_stdout(io.StringIO()):
+                migrate.main()
+            store = lb.SessionStore(root / 'sessions.sqlite3')
+            self.assertEqual(rows, store.history('qwen'))
+            self.assertEqual(1, store.legacy_import_count('qwen'))
 
 
 if __name__ == '__main__':
