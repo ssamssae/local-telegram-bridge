@@ -28,14 +28,22 @@ installer_spec.loader.exec_module(installer)
 
 
 class Telegram:
+    def __init__(self):
+        self.sent = []
+
     def call(self, method, **payload):
         if method == 'sendChatAction':
             return True
-        return {'message_id': 1}
+        self.sent.append(payload['text'])
+        return {'message_id': len(self.sent)}
 
 
 class Models:
+    def __init__(self):
+        self.calls = []
+
     def chat(self, profile, messages):
+        self.calls.append((profile, messages))
         return 'answer:' + messages[-1]['content']
 
 
@@ -107,6 +115,90 @@ class SharedChatAcceptanceTests(unittest.TestCase):
             self.assertNotEqual(-1, question, rendered)
             self.assertNotEqual(-1, answer, rendered)
             self.assertLess(question, answer, rendered)
+
+    def test_simultaneous_terminal_and_telegram_inputs_follow_commit_order_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = {
+                'owner_id': 42,
+                'default_profile': 'qwen',
+                'fixed_profile': 'qwen',
+                'history_turns': 3,
+                'max_tokens': 64,
+                'unload_other_profiles': True,
+                'state_file': str(root / 'state.json'),
+                'session_db': str(root / 'sessions.sqlite3'),
+                'profiles': {
+                    'qwen': {
+                        'provider': 'lmstudio',
+                        'label': 'Qwen',
+                        'model': 'qwen',
+                        'base_url': 'http://127.0.0.1:1234',
+                    },
+                },
+            }
+            config_path = root / 'config.json'
+            config_path.write_text(json.dumps(config))
+            telegram, models = Telegram(), Models()
+            app = bridge.Bridge(config, telegram, models, bridge_id='qwen-bot')
+            start = threading.Barrier(2)
+            replies = iter(['terminal question', '/exit'])
+            errors = []
+
+            def terminal_input(_prompt):
+                value = next(replies)
+                if value == 'terminal question':
+                    start.wait(2)
+                return value
+
+            def run_terminal():
+                try:
+                    with patch.object(
+                            terminal.sys, 'argv',
+                            ['terminal_chat.py', '--config', str(config_path)]), \
+                            patch.object(builtins, 'input', terminal_input), \
+                            redirect_stdout(io.StringIO()):
+                        terminal.main()
+                except Exception as error:
+                    errors.append(error)
+
+            client = threading.Thread(target=run_terminal)
+            client.start()
+            start.wait(2)
+            app.handle({
+                'update_id': 1,
+                'message': {
+                    'text': 'telegram question',
+                    'from': {'id': 42},
+                    'chat': {'id': 42, 'type': 'private'},
+                },
+            })
+            client.join(3)
+            self.assertFalse(client.is_alive())
+            self.assertEqual([], errors)
+
+            app.flush()
+            while app.process_pending():
+                app.flush()
+
+            prompts = [call[1][-1]['content'] for call in models.calls]
+            self.assertCountEqual(
+                ['terminal question', 'telegram question'], prompts)
+            self.assertEqual(2, len(prompts))
+            history = app.store.history('qwen')
+            self.assertEqual(prompts, [history[0]['content'], history[2]['content']])
+            self.assertEqual(
+                ['answer:' + prompts[0], 'answer:' + prompts[1]],
+                [history[1]['content'], history[3]['content']])
+            second_context = models.calls[1][1]
+            self.assertEqual(prompts[0], second_context[1]['content'])
+            self.assertEqual('answer:' + prompts[0], second_context[2]['content'])
+            self.assertEqual(3, len(telegram.sent))
+            self.assertEqual(1, telegram.sent.count('[Terminal]\nterminal question'))
+            self.assertEqual(
+                1, telegram.sent.count('[Qwen]\nanswer:terminal question'))
+            self.assertEqual(
+                1, telegram.sent.count('[Qwen]\nanswer:telegram question'))
 
     def test_installed_service_still_launches_bridge_after_copying_shared_clients(self):
         with tempfile.TemporaryDirectory() as directory:
