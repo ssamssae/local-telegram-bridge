@@ -290,7 +290,8 @@ class Bridge:
         if self.state['selected'] not in config['profiles']:
             raise BridgeError('Saved profile missing from config; update the private state')
         for name, rows in self.state['histories'].items():
-            if rows and name in config['profiles'] and not self.store.history(name):
+            if (rows and name in self.profiles and not self.store.history(name)
+                    and not self.store.latest_event_id(name)):
                 raise BridgeError('Legacy JSON history needs migrate_history.py before bridge startup')
         self._sync_history_state()
 
@@ -484,7 +485,7 @@ class Bridge:
                     self.flush()
                 self.flush()
                 updates = self.telegram.call('getUpdates', offset=self.state.get('offset', 0),
-                                               timeout=25, allowed_updates=['message', 'callback_query'])
+                                               timeout=1, allowed_updates=['message', 'callback_query'])
                 for update in updates or []:
                     self.handle(update)
                     self.flush()
