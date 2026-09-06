@@ -4,6 +4,7 @@ import io
 import json
 from contextlib import redirect_stdout
 from pathlib import Path
+import plistlib
 import tempfile
 import threading
 import time
@@ -20,6 +21,10 @@ terminal_spec = importlib.util.spec_from_file_location(
     'terminal_chat_acceptance', ROOT / 'terminal_chat.py')
 terminal = importlib.util.module_from_spec(terminal_spec)
 terminal_spec.loader.exec_module(terminal)
+installer_spec = importlib.util.spec_from_file_location(
+    'install_macos_acceptance', ROOT / 'install_macos.py')
+installer = importlib.util.module_from_spec(installer_spec)
+installer_spec.loader.exec_module(installer)
 
 
 class Telegram:
@@ -102,6 +107,30 @@ class SharedChatAcceptanceTests(unittest.TestCase):
             self.assertNotEqual(-1, question, rendered)
             self.assertNotEqual(-1, answer, rendered)
             self.assertLess(question, answer, rendered)
+
+    def test_installed_service_still_launches_bridge_after_copying_shared_clients(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = home / 'qwen.json'
+            config.write_text('{}')
+            (home / 'Library' / 'LaunchAgents').mkdir(parents=True)
+            with patch.object(installer.Path, 'home', return_value=home), \
+                    patch.object(installer, 'read_config'), \
+                    patch.object(installer.sys, 'platform', 'darwin'), \
+                    patch.object(
+                        installer.sys, 'argv',
+                        ['install_macos.py', '--config', str(config),
+                         '--instance', 'qwen']), \
+                    patch.object(installer.subprocess, 'run'), \
+                    redirect_stdout(io.StringIO()):
+                installer.main()
+
+            plist_path = (
+                home / 'Library' / 'LaunchAgents' /
+                'com.local-telegram-bridge-qwen.plist')
+            service = plistlib.loads(plist_path.read_bytes())
+            expected = home / '.local/share/local-telegram-bridge/local_bridge.py'
+            self.assertEqual(str(expected), service['ProgramArguments'][1])
 
 
 if __name__ == '__main__':
