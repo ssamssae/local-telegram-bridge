@@ -90,6 +90,8 @@ def read_config(path):
     profiles = config.get('profiles', {})
     if not profiles or config.get('default_profile') not in profiles:
         raise BridgeError('Set profiles and default_profile')
+    if 'fixed_profile' in config and config['fixed_profile'] not in profiles:
+        raise BridgeError('fixed_profile must name a configured profile')
     for name, profile in profiles.items():
         if not re.fullmatch('[a-z0-9_]{1,32}', name):
             raise BridgeError('Profile names must be valid Telegram commands')
@@ -108,6 +110,15 @@ def read_config(path):
     config.setdefault('max_tokens', 1024)
     config.setdefault('unload_other_profiles', False)
     return config
+
+
+def bot_commands(config):
+    commands = [{'command': 'clear', 'description': '새 대화 시작'},
+                {'command': 'status', 'description': '모델과 대화 상태'},
+                {'command': 'help', 'description': '사용 방법'}]
+    if not config.get('fixed_profile'):
+        commands.insert(0, {'command': 'model', 'description': '버튼으로 모델 선택'})
+    return commands
 
 
 def read_token(config):
@@ -263,6 +274,9 @@ class Bridge:
         self.state.setdefault('selected', config['default_profile'])
         self.state.setdefault('histories', {})
         self.state.setdefault('outbox', [])
+        if config.get('fixed_profile'):
+            # A previous model selection must not override this bot's binding.
+            self.state['selected'] = config['fixed_profile']
         if self.state['selected'] not in config['profiles']:
             raise BridgeError('Saved profile missing from config; update the private state')
 
@@ -284,7 +298,10 @@ class Bridge:
 
     def help(self, selected):
         rows = ['로컬 AI 채팅 · 현재: ' + self.config['profiles'][selected]['label']]
-        rows += ['/model 모델 선택 · /clear 새 대화 · /status 현재 모델 · /help 도움말',
+        commands = '/clear 새 대화 · /status 현재 모델 · /help 도움말'
+        if not self.config.get('fixed_profile'):
+            commands = '/model 모델 선택 · ' + commands
+        rows += [commands,
                  '모델 연산은 이 컴퓨터에서 실행합니다. 메시지는 Telegram을 거칩니다.']
         return '\n'.join(rows)
 
@@ -322,10 +339,14 @@ class Bridge:
             self.save()
             return
         selected = following['selected']
+        fixed = self.config.get('fixed_profile')
         if callback:
             data = callback.get('data')
             name = data[6:] if isinstance(data, str) and data.startswith('model:') else ''
-            if name in self.config['profiles']:
+            if fixed:
+                reply = self.config['profiles'][selected]['label'] + ' 전용 봇입니다. 질문을 보내주세요.'
+                notice = '이 봇에서는 모델을 전환하지 않습니다.'
+            elif name in self.config['profiles']:
                 selected = name
                 following['selected'] = name
                 reply = self.config['profiles'][name]['label'] + '로 전환했습니다. 질문을 보내주세요.'
@@ -333,7 +354,7 @@ class Bridge:
             else:
                 reply = '사용할 수 없는 모델입니다. 아래에서 다시 선택하세요.'
                 notice = '모델 목록을 다시 확인하세요.'
-            _, markup = self.model_picker(selected)
+            markup = None if fixed else self.model_picker(selected)[1]
             self.queue_reply(following, update_id, reply, markup)
             if callback.get('id'):
                 try:
@@ -355,12 +376,12 @@ class Bridge:
             reply = self.config['profiles'][selected]['label'] + ' · 새 대화를 시작합니다.'
         elif command == '/new':
             reply = '새 대화 명령이 /clear로 바뀌었습니다. /clear를 보내주세요.'
-        elif command in ('/model', '/models'):
+        elif not fixed and command in ('/model', '/models'):
             reply, markup = self.model_picker(selected)
         elif command == '/status':
             count = len(following['histories'].get(selected, [])) // 2
             reply = self.help(selected) + '\n저장된 대화: ' + str(count) + '턴'
-        elif command.startswith('/') and command[1:] in self.config['profiles']:
+        elif not fixed and command.startswith('/') and command[1:] in self.config['profiles']:
             selected = command[1:]
             following['selected'] = selected
             reply = self.config['profiles'][selected]['label'] + '로 전환했습니다. 질문을 보내주세요.'
@@ -417,11 +438,7 @@ def main():
         print(json.dumps({'bot': identity['username'], 'profiles': list(config['profiles'])}))
         return
     if args.register_commands:
-        commands = [{'command': 'model', 'description': '버튼으로 모델 선택'},
-                    {'command': 'clear', 'description': '현재 모델의 새 대화'},
-                    {'command': 'status', 'description': '현재 모델과 대화 상태'},
-                    {'command': 'help', 'description': '사용 방법'}]
-        telegram.call('setMyCommands', commands=commands)
+        telegram.call('setMyCommands', commands=bot_commands(config))
         print('Bot command menu updated')
         return
     lock_dir = Path.home() / '.local/state/local-telegram-bridge/locks'

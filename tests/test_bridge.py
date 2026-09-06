@@ -125,6 +125,63 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual('20b', self.bridge.state['selected'])
         self.assertEqual([], self.models.calls)
 
+    def test_fixed_bot_ignores_saved_selection_and_removed_commands(self):
+        self.submit(1, '/qwen')
+        self.submit(2, 'keep Qwen history')
+        self.config['fixed_profile'] = '20b'
+        self.bridge = lb.Bridge(self.config, self.telegram, self.models)
+        for number, command in enumerate(['/model', '/models', '/qwen@example_bot', '/20b'], 3):
+            self.submit(number, command)
+            self.assertNotIn('reply_markup', self.telegram.sent_payloads[-1])
+            self.assertEqual('20b', self.bridge.state['selected'])
+        self.submit(7, '20B only')
+        self.assertEqual('20b', self.models.calls[-1][0])
+        self.assertNotIn('keep Qwen history', json.dumps(self.models.calls[-1][1]))
+        self.assertEqual(2, len(self.bridge.state['histories']['qwen']))
+        self.assertEqual('20b', lb.Bridge(self.config, self.telegram, self.models).state['selected'])
+
+    def test_fixed_bot_old_buttons_cannot_change_binding(self):
+        self.config['fixed_profile'] = '20b'
+        self.bridge = lb.Bridge(self.config, self.telegram, self.models)
+        self.bridge.handle(self.callback(1))
+        self.bridge.flush()
+        self.assertEqual('20b', self.bridge.state['selected'])
+        self.assertEqual([], self.models.calls)
+        self.assertNotIn('reply_markup', self.telegram.sent_payloads[-1])
+        self.assertEqual(1, len(self.telegram.callbacks))
+
+    def test_fixed_bot_menu_help_and_status_do_not_offer_model_selection(self):
+        self.config['fixed_profile'] = '20b'
+        self.assertEqual(['clear', 'status', 'help'],
+                         [item['command'] for item in lb.bot_commands(self.config)])
+        for number, command in enumerate(['/start', '/help', '/status'], 1):
+            self.submit(number, command)
+            self.assertNotIn('/model', self.telegram.sent[-1])
+
+    def test_separate_fixed_bots_keep_clear_and_restart_isolated(self):
+        self.config['fixed_profile'] = '20b'
+        qwen_config = copy.deepcopy(self.config)
+        qwen_config.update(fixed_profile='qwen', default_profile='qwen',
+                           state_file=str(Path(self.tmp.name) / 'qwen.json'))
+        qwen = lb.Bridge(qwen_config, self.telegram, self.models)
+        self.submit(1, '20B history')
+        qwen.handle(self.update(1, 'Qwen history'))
+        qwen.flush()
+        qwen.handle(self.update(2, '/clear'))
+        qwen.flush()
+        restored = lb.Bridge(qwen_config, self.telegram, self.models)
+        self.assertEqual([], restored.state['histories']['qwen'])
+        self.assertEqual(2, len(self.bridge.state['histories']['20b']))
+        self.assertEqual('qwen', restored.state['selected'])
+
+    def test_unknown_fixed_profile_rejected(self):
+        config = copy.deepcopy(self.config)
+        config['fixed_profile'] = 'missing'
+        path = Path(self.tmp.name) / 'config.json'
+        path.write_text(json.dumps(config))
+        with self.assertRaises(lb.BridgeError):
+            lb.read_config(path)
+
     def test_button_switch_persists_and_routes_next_question(self):
         self.submit(1, '20B history')
         self.bridge.handle(self.callback(2))

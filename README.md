@@ -53,6 +53,25 @@ launchctl bootout "gui/$(id -u)/com.local-telegram-bridge"
 
 ## Commands
 
+### One bot per model
+
+Set `"fixed_profile": "20b"` or `"fixed_profile": "qwen"` in a bot's private config to bind it to that model. Fixed bots expose only `/clear`, `/status`, and `/help`; `/model`, profile shortcuts, and old model-selection buttons cannot switch the model. A previously saved selection does not override the binding.
+
+For two bots, create two BotFather tokens and two configs with **different `token_file` and `state_file` paths**. Keep the same `inference_lock_file` in both configs and any cooperating terminal clients. Keep both models in `profiles` with `unload_other_profiles: true` so either bot can release its peer's model before loading its own. Only `fixed_profile` is available for chat.
+
+Install both macOS services separately:
+
+```bash
+python3 install_macos.py --config ~/.config/local-telegram-bridge/config.json
+python3 install_macos.py --config ~/.config/local-telegram-bridge/qwen.json --instance qwen
+```
+
+The second service is `com.local-telegram-bridge-qwen` and writes to `~/Library/Logs/local-telegram-bridge-qwen/`. Register commands separately for each config. Start a private chat with each bot before expecting replies. Polling offsets belong to a bot token: when migrating history to a new bot, copy only that model's history into a fresh state with offset `0` and an empty outbox, never copy the old bot's polling offset or pending replies.
+
+### Optional model selection
+
+Without `fixed_profile`, one bot can select between the configured models:
+
 | Command | Behavior |
 | --- | --- |
 | `/model` or `/models` | Open model selection buttons; the current model has a check mark |

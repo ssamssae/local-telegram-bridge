@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -14,7 +15,10 @@ from local_bridge import read_config
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
+    parser.add_argument('--instance', default='', help='Separate service and logs, e.g. qwen')
     args = parser.parse_args()
+    if args.instance and not re.fullmatch('[a-z0-9][a-z0-9_-]{0,31}', args.instance):
+        parser.error('instance must use 1–32 lowercase letters, digits, underscores or hyphens')
     if sys.platform != 'darwin':
         raise SystemExit('This installer is for macOS; run local_bridge.py directly on Linux.')
     config = Path(args.config).expanduser().resolve()
@@ -22,14 +26,15 @@ def main():
     config.chmod(0o600)
     home = Path.home()
     dest = home / '.local/share/local-telegram-bridge'
-    logs = home / 'Library/Logs/local-telegram-bridge'
+    suffix = '-' + args.instance if args.instance else ''
+    logs = home / ('Library/Logs/local-telegram-bridge' + suffix)
     dest.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).resolve().with_name('local_bridge.py')
     target = dest / 'local_bridge.py'
     if source != target:
         shutil.copy2(source, target)
-    label = 'com.local-telegram-bridge'
+    label = 'com.local-telegram-bridge' + suffix
     plist = home / 'Library/LaunchAgents' / (label + '.plist')
     plist.parent.mkdir(parents=True, exist_ok=True)
     value = {'Label': label,
