@@ -207,7 +207,7 @@ class LocalModels:
                             'num_predict': self.config['max_tokens'], 'temperature': 0.2}}, timeout=300)
             text = (data.get('message') or {}).get('content') or ''
         if not text.strip():
-            raise BridgeError('Model returned no answer; try a shorter question or /new')
+            raise BridgeError('Model returned no answer; try a shorter question or /clear')
         return text.strip()
 
 
@@ -252,8 +252,9 @@ class Bridge:
     def flush(self):
         while self.state['outbox']:
             item = self.state['outbox'][0]
+            extra = {'reply_markup': item['reply_markup']} if 'reply_markup' in item else {}
             result = self.telegram.call('sendMessage', chat_id=self.config['owner_id'],
-                                        text=item['text'])
+                                        text=item['text'], **extra)
             if not isinstance(result, dict) or not result.get('message_id'):
                 raise BridgeError('Telegram delivery was not confirmed')
             self.state['last_delivery'] = {'message_id': result['message_id'],
@@ -263,10 +264,25 @@ class Bridge:
 
     def help(self, selected):
         rows = ['로컬 AI 채팅 · 현재: ' + self.config['profiles'][selected]['label']]
-        rows += ['/' + name + ' → ' + p['label'] for name, p in self.config['profiles'].items()]
-        rows += ['/status 현재 모델 · /new 현재 모델의 새 대화 · /help 도움말',
+        rows += ['/model 모델 선택 · /clear 새 대화 · /status 현재 모델 · /help 도움말',
                  '모델 연산은 이 컴퓨터에서 실행합니다. 메시지는 Telegram을 거칩니다.']
         return '\n'.join(rows)
+
+    def model_picker(self, selected):
+        keyboard = {'inline_keyboard': [
+            [{'text': ('✅ ' if name == selected else '') + profile['label'],
+              'callback_data': 'model:' + name}]
+            for name, profile in self.config['profiles'].items()]}
+        text = '모델을 선택하세요.\n현재: ' + self.config['profiles'][selected]['label']
+        return text, keyboard
+
+    def queue_reply(self, following, update_id, reply, markup=None):
+        following['outbox'] = [{'update_id': update_id, 'text': part} for part in split_message(reply)]
+        if markup and following['outbox']:
+            following['outbox'][-1]['reply_markup'] = markup
+        self.state = following
+        # Commit generated replies and offset together BEFORE Telegram delivery.
+        self.save()
 
     def handle(self, update):
         update_id = update.get('update_id')
@@ -276,25 +292,52 @@ class Bridge:
             raise BridgeError('Flush pending replies before accepting another update')
         following = copy.deepcopy(self.state)
         following['offset'] = update_id + 1
-        message = update.get('message') or {}
-        chat, sender = message.get('chat') or {}, message.get('from') or {}
+        callback = update.get('callback_query')
+        message = (callback.get('message') if callback else update.get('message')) or {}
+        chat = message.get('chat') or {}
+        sender = (callback.get('from') if callback else message.get('from')) or {}
         owner = self.config['owner_id']
         if chat.get('type') != 'private' or chat.get('id') != owner or sender.get('id') != owner:
             self.state = following
             self.save()
             return
-        text = (message.get('text') or '').strip()
         selected = following['selected']
+        if callback:
+            data = callback.get('data')
+            name = data[6:] if isinstance(data, str) and data.startswith('model:') else ''
+            if name in self.config['profiles']:
+                selected = name
+                following['selected'] = name
+                reply = self.config['profiles'][name]['label'] + '로 전환했습니다. 질문을 보내주세요.'
+                notice = '모델을 선택했습니다.'
+            else:
+                reply = '사용할 수 없는 모델입니다. 아래에서 다시 선택하세요.'
+                notice = '모델 목록을 다시 확인하세요.'
+            _, markup = self.model_picker(selected)
+            self.queue_reply(following, update_id, reply, markup)
+            if callback.get('id'):
+                try:
+                    self.telegram.call('answerCallbackQuery', callback_query_id=callback['id'], text=notice)
+                except BridgeError:
+                    # Expired callback acknowledgements must not block the saved reply.
+                    pass
+            return
+        text = (message.get('text') or '').strip()
+        markup = None
         command, _, argument = text.partition(' ')
         command = command.split('@', 1)[0].lower()
         if not text:
             reply = '이 연결은 텍스트 채팅용입니다. 질문을 글로 보내주세요.'
         elif command in ('/start', '/help'):
             reply = self.help(selected)
-        elif command in ('/new', '/clear'):
+        elif command == '/clear':
             following['histories'][selected] = []
             reply = self.config['profiles'][selected]['label'] + ' · 새 대화를 시작합니다.'
-        elif command in ('/status', '/models'):
+        elif command == '/new':
+            reply = '새 대화 명령이 /clear로 바뀌었습니다. /clear를 보내주세요.'
+        elif command in ('/model', '/models'):
+            reply, markup = self.model_picker(selected)
+        elif command == '/status':
             count = len(following['histories'].get(selected, [])) // 2
             reply = self.help(selected) + '\n저장된 대화: ' + str(count) + '턴'
         elif command.startswith('/') and command[1:] in self.config['profiles']:
@@ -320,11 +363,8 @@ class Bridge:
                 reply = '[' + self.config['profiles'][selected]['label'] + ']\n' + answer
             except (BridgeError, subprocess.SubprocessError) as error:
                 safe = str(error) if isinstance(error, BridgeError) else 'Local application could not start'
-                reply = '응답 실패: ' + safe + '\n이번 질문은 대화에 저장하지 않았습니다. 다시 보내거나 /new를 사용하세요.'
-        following['outbox'] = [{'update_id': update_id, 'text': part} for part in split_message(reply)]
-        self.state = following
-        # Commit generated replies and offset together BEFORE attempting Telegram delivery.
-        self.save()
+                reply = '응답 실패: ' + safe + '\n이번 질문은 대화에 저장하지 않았습니다. 다시 보내거나 /clear를 사용하세요.'
+        self.queue_reply(following, update_id, reply, markup)
 
     def run(self):
         retry = 1
@@ -332,7 +372,7 @@ class Bridge:
             try:
                 self.flush()
                 updates = self.telegram.call('getUpdates', offset=self.state.get('offset', 0),
-                                               timeout=25, allowed_updates=['message'])
+                                               timeout=25, allowed_updates=['message', 'callback_query'])
                 for update in updates or []:
                     self.handle(update)
                     self.flush()
@@ -357,10 +397,10 @@ def main():
         print(json.dumps({'bot': identity['username'], 'profiles': list(config['profiles'])}))
         return
     if args.register_commands:
-        commands = [{'command': name, 'description': p['label'][:256]} for name, p in config['profiles'].items()]
-        commands += [{'command': 'status', 'description': '현재 모델과 대화 상태'},
-                     {'command': 'new', 'description': '현재 모델의 새 대화'},
-                     {'command': 'help', 'description': '사용 방법'}]
+        commands = [{'command': 'model', 'description': '버튼으로 모델 선택'},
+                    {'command': 'clear', 'description': '현재 모델의 새 대화'},
+                    {'command': 'status', 'description': '현재 모델과 대화 상태'},
+                    {'command': 'help', 'description': '사용 방법'}]
         telegram.call('setMyCommands', commands=commands)
         print('Bot command menu updated')
         return
