@@ -30,15 +30,19 @@ def main():
     logs = home / ('Library/Logs/local-telegram-bridge' + suffix)
     dest.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
-    source = Path(__file__).resolve().with_name('local_bridge.py')
-    target = dest / 'local_bridge.py'
-    if source != target:
-        shutil.copy2(source, target)
+    source_dir = Path(__file__).resolve().parent
+    bridge_target = dest / 'local_bridge.py'
+    for name in ('local_bridge.py', 'session_store.py', 'terminal_chat.py',
+                 'migrate_history.py'):
+        source = source_dir / name
+        target = dest / name
+        if source != target:
+            shutil.copy2(source, target)
     label = 'com.local-telegram-bridge' + suffix
     plist = home / 'Library/LaunchAgents' / (label + '.plist')
     plist.parent.mkdir(parents=True, exist_ok=True)
     value = {'Label': label,
-             'ProgramArguments': [sys.executable, str(target), '--config', str(config)],
+             'ProgramArguments': [sys.executable, str(bridge_target), '--config', str(config)],
              'WorkingDirectory': str(home), 'RunAtLoad': True, 'KeepAlive': True,
              'ThrottleInterval': 10,
              'EnvironmentVariables': {'PYTHONUNBUFFERED': '1',
@@ -52,6 +56,7 @@ def main():
     subprocess.run(['/bin/launchctl', 'bootstrap', domain, str(plist)], check=True)
     print('Installed ' + str(plist))
     print('Logs: ' + str(logs))
+    print('Terminal: ' + str(dest / 'terminal_chat.py') + ' --config ' + str(config))
 
 
 if __name__ == '__main__':

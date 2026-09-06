@@ -137,7 +137,7 @@ class BridgeTests(unittest.TestCase):
         self.submit(7, '20B only')
         self.assertEqual('20b', self.models.calls[-1][0])
         self.assertNotIn('keep Qwen history', json.dumps(self.models.calls[-1][1]))
-        self.assertEqual(2, len(self.bridge.state['histories']['qwen']))
+        self.assertEqual(2, len(self.bridge.store.history('qwen')))
         self.assertEqual('20b', lb.Bridge(self.config, self.telegram, self.models).state['selected'])
 
     def test_fixed_bot_old_buttons_cannot_change_binding(self):
@@ -268,7 +268,7 @@ class BridgeTests(unittest.TestCase):
     def test_failed_inference_does_not_pollute_history(self):
         self.models.fail = True
         self.submit(1, 'fail')
-        self.assertEqual({}, self.bridge.state['histories'])
+        self.assertTrue(all(not rows for rows in self.bridge.state['histories'].values()))
         self.assertIn('응답 실패', self.telegram.sent[0])
 
     def test_outbox_recovers_without_regenerating_reply(self):
@@ -289,7 +289,7 @@ class BridgeTests(unittest.TestCase):
         with patch.object(self.telegram, 'call', return_value={}):
             with self.assertRaises(lb.BridgeError):
                 self.bridge.flush()
-        self.assertEqual(1, len(self.bridge.state['outbox']))
+        self.assertIsNotNone(self.bridge.store.pending_outbox(self.bridge.profiles))
 
     def test_duplicate_update_is_not_processed_again(self):
         self.submit(10, 'hello')

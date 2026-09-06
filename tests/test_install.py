@@ -32,6 +32,9 @@ class InstallTests(unittest.TestCase):
             self.assertIn('local-telegram-bridge-qwen/', plist['StandardOutPath'])
             self.assertEqual(str(config.resolve()), plist['ProgramArguments'][-1])
             self.assertTrue(run.call_args_list[0].args[0][-1].endswith('/com.local-telegram-bridge-qwen'))
+            for name in ('local_bridge.py', 'session_store.py', 'terminal_chat.py',
+                         'migrate_history.py'):
+                self.assertTrue((home / '.local/share/local-telegram-bridge' / name).exists())
 
     def test_invalid_instance_cannot_escape_service_directory(self):
         with patch.object(installer.sys, 'argv', ['install_macos.py', '--config', '/missing', '--instance', '../other']):
