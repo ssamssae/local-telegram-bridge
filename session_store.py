@@ -298,6 +298,28 @@ class SessionStore:
                              (profile,)).fetchone()
             return row['value']
 
+    def terminal_snapshot(self, profile):
+        """Return startup history, unfinished inputs, and cursor from one read view."""
+        with self._connection() as db:
+            db.execute('BEGIN')
+            history_rows = db.execute(
+                'SELECT role, content FROM messages WHERE profile=? ORDER BY id',
+                (profile,)).fetchall()
+            pending_rows = db.execute('''
+                SELECT e.*, r.source_key FROM events e
+                JOIN requests r ON r.id=e.request_id
+                WHERE e.profile=? AND e.kind='user'
+                    AND r.status IN ('queued', 'running')
+                ORDER BY e.id
+            ''', (profile,)).fetchall()
+            cursor = db.execute(
+                'SELECT COALESCE(MAX(id), 0) AS value FROM events WHERE profile=?',
+                (profile,)).fetchone()['value']
+        history = [
+            {'role': row['role'], 'content': row['content']} for row in history_rows
+        ]
+        return history, [dict(row) for row in pending_rows], cursor
+
     def events_since(self, profile, event_id):
         with self._connection() as db:
             rows = db.execute('''

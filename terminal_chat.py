@@ -84,13 +84,14 @@ def main():
     console = Console(prompt)
     print(label + ' · shared Telegram/terminal session')
     print('/clear 새 대화 · /exit 종료 · 모델 전환 없음')
-    history = store.history(profile)
+    history, pending, cursor = store.terminal_snapshot(profile)
     if history:
         print('저장된 대화 ' + str(len(history) // 2) + '턴:')
         for row in history:
             who = '나' if row['role'] == 'user' else label
             print(who + ' › ' + row['content'])
-    cursor = store.latest_event_id(profile)
+    for event in pending:
+        print(event_text(event, label))
     stop = threading.Event()
 
     def watch():
