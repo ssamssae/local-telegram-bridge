@@ -168,6 +168,11 @@ class RuntimeRegressionTests(unittest.TestCase):
             self.assertEqual('작성중', request['content'])
             self.bridge.store.complete_chat(request, '입력 보존', 6, [])
             wait_text('qwen › 입력 보존')
+            while select.select([master], [], [], .1)[0]:
+                received.extend(os.read(master, 65536))
+            self.assertTrue(received.endswith('qwen › '.encode()),
+                            'Submitted input was redrawn at the next prompt: ' +
+                            received.decode(errors='replace'))
             os.write(master, b'/exit' + bytes([13]))
         finally:
             os.close(master)

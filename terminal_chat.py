@@ -36,6 +36,10 @@ class Console:
     def event(self, text):
         with self.lock:
             buffer = self.line_editor.get_line_buffer() if self.input_active else ''
+            # macOS libedit retains the last submitted line (including its newline)
+            # until the next keystroke. It is not the new prompt's pending input.
+            if buffer.endswith('\n'):
+                buffer = ''
             if self.input_active:
                 self.stream.write('\r\x1b[2K')
             self.stream.write(text + '\n')
