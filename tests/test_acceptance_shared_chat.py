@@ -1,0 +1,108 @@
+import builtins
+import importlib.util
+import io
+import json
+from contextlib import redirect_stdout
+from pathlib import Path
+import tempfile
+import threading
+import time
+import unittest
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).parents[1]
+bridge_spec = importlib.util.spec_from_file_location(
+    'local_bridge_acceptance', ROOT / 'local_bridge.py')
+bridge = importlib.util.module_from_spec(bridge_spec)
+bridge_spec.loader.exec_module(bridge)
+terminal_spec = importlib.util.spec_from_file_location(
+    'terminal_chat_acceptance', ROOT / 'terminal_chat.py')
+terminal = importlib.util.module_from_spec(terminal_spec)
+terminal_spec.loader.exec_module(terminal)
+
+
+class Telegram:
+    def call(self, method, **payload):
+        if method == 'sendChatAction':
+            return True
+        return {'message_id': 1}
+
+
+class Models:
+    def chat(self, profile, messages):
+        return 'answer:' + messages[-1]['content']
+
+
+class SharedChatAcceptanceTests(unittest.TestCase):
+    def test_reconnecting_terminal_replays_queued_telegram_question_before_answer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = {
+                'owner_id': 42,
+                'default_profile': 'qwen',
+                'fixed_profile': 'qwen',
+                'history_turns': 3,
+                'max_tokens': 64,
+                'unload_other_profiles': True,
+                'state_file': str(root / 'state.json'),
+                'session_db': str(root / 'sessions.sqlite3'),
+                'profiles': {
+                    'qwen': {
+                        'provider': 'lmstudio',
+                        'label': 'Qwen',
+                        'model': 'qwen',
+                        'base_url': 'http://127.0.0.1:1234',
+                    },
+                },
+            }
+            config_path = root / 'config.json'
+            config_path.write_text(json.dumps(config))
+            app = bridge.Bridge(config, Telegram(), Models(), bridge_id='qwen-bot')
+            app.store.enqueue(
+                'qwen', 'telegram', 'qwen-bot:1', 'chat', 'reconnect question')
+
+            waiting_for_input = threading.Event()
+            release_input = threading.Event()
+            errors = []
+            output = io.StringIO()
+
+            def blocked_input(_prompt):
+                waiting_for_input.set()
+                release_input.wait(3)
+                raise EOFError
+
+            def run_terminal():
+                try:
+                    with patch.object(
+                            terminal.sys, 'argv',
+                            ['terminal_chat.py', '--config', str(config_path)]), \
+                            patch.object(builtins, 'input', blocked_input), \
+                            redirect_stdout(output):
+                        terminal.main()
+                except Exception as error:  # surfaced below with the captured output
+                    errors.append(error)
+
+            client = threading.Thread(target=run_terminal)
+            client.start()
+            self.assertTrue(waiting_for_input.wait(2), 'terminal did not reach its prompt')
+            self.assertTrue(app.process_pending())
+
+            deadline = time.monotonic() + 2
+            while 'answer:reconnect question' not in output.getvalue() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            release_input.set()
+            client.join(3)
+
+            self.assertFalse(client.is_alive())
+            self.assertEqual([], errors)
+            rendered = output.getvalue()
+            question = rendered.find('Telegram › reconnect question')
+            answer = rendered.find('Qwen › answer:reconnect question')
+            self.assertNotEqual(-1, question, rendered)
+            self.assertNotEqual(-1, answer, rendered)
+            self.assertLess(question, answer, rendered)
+
+
+if __name__ == '__main__':
+    unittest.main()
