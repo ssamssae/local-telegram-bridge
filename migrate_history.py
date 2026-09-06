@@ -20,7 +20,7 @@ def validate_rows(value, source):
                 not isinstance(row.get('content'), str)):
             raise BridgeError(source + ': invalid row ' + str(index))
         rows.append({'role': row['role'], 'content': row['content']})
-    if any(row['role'] != ('user' if index % 2 == 0 else 'assistant')
+    if len(rows) % 2 or any(row['role'] != ('user' if index % 2 == 0 else 'assistant')
            for index, row in enumerate(rows)):
         raise BridgeError(source + ': history must contain complete user/assistant turns')
     return rows

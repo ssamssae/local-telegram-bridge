@@ -82,6 +82,15 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(2, len(restored.store.history('qwen')))
         self.assertEqual([], restored.store.history('20b'))
 
+    def test_queued_input_does_not_bypass_required_legacy_migration(self):
+        self.bridge.state['histories']['qwen'] = [
+            {'role': 'user', 'content': 'legacy question'},
+            {'role': 'assistant', 'content': 'legacy answer'}]
+        self.bridge.save()
+        self.bridge.store.enqueue('qwen', 'terminal', 'before-migration', 'chat', 'new input')
+        with self.assertRaisesRegex(lb.BridgeError, 'migrate_history'):
+            lb.Bridge(self.config, self.telegram, self.models)
+
     def test_terminal_request_is_not_blocked_by_idle_telegram_poll(self):
         entered, stop = threading.Event(), threading.Event()
         parent = self.telegram.call

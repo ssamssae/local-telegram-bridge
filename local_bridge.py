@@ -296,7 +296,7 @@ class Bridge:
         for name in self.profiles:
             rows = self.state['histories'].get(name, [])
             if (rows and not self.store.history(name)
-                    and not self.store.latest_event_id(name)):
+                    and not self.store.was_cleared(name)):
                 raise BridgeError('Legacy JSON history needs migrate_history.py before bridge startup')
         self._sync_history_state()
 

@@ -298,6 +298,12 @@ class SessionStore:
                              (profile,)).fetchone()
             return row['value']
 
+    def was_cleared(self, profile):
+        with self._connection() as db:
+            return db.execute(
+                "SELECT 1 FROM events WHERE profile=? AND kind='clear' LIMIT 1",
+                (profile,)).fetchone() is not None
+
     def terminal_snapshot(self, profile):
         """Return startup history, unfinished inputs, and cursor from one read view."""
         with self._connection() as db:

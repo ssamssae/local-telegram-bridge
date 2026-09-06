@@ -197,6 +197,8 @@ class MigrationTests(unittest.TestCase):
     def test_migration_rejects_incomplete_turns(self):
         with self.assertRaises(migrate.BridgeError):
             migrate.validate_rows([{'role': 'assistant', 'content': 'orphan'}], 'source')
+        with self.assertRaises(migrate.BridgeError):
+            migrate.validate_rows([{'role': 'user', 'content': 'unfinished'}], 'source')
 
     def test_cli_dry_run_then_execute_seeds_shared_history(self):
         with tempfile.TemporaryDirectory() as directory:
