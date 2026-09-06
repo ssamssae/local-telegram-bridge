@@ -8,10 +8,12 @@
   "unload_other_profiles": true,
   "profiles": {
     "20b": {
-      "provider": "ollama",
-      "label": "Ollama · gpt-oss 20B",
-      "base_url": "http://127.0.0.1:11434",
-      "model": "gpt-oss:20b",
+      "provider": "lmstudio",
+      "label": "LM Studio · gpt-oss 20B",
+      "base_url": "http://127.0.0.1:1234",
+      "model": "gpt-oss-20b",
+      "lms_bin": "lms",
+      "start_app": true,
       "context_length": 4096,
       "ttl_seconds": 60
     },

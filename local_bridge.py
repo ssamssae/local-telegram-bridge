@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -22,6 +23,21 @@ import urllib.request
 
 class BridgeError(Exception):
     """A diagnostic that is safe to print without exposing credentials or prompts."""
+
+
+@contextmanager
+def inference_lock(path):
+    """Serialize cooperating clients across model unload, load, and inference."""
+    if not path:
+        yield
+        return
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT, 0o600)
+    with os.fdopen(fd, 'w') as lock:
+        os.fchmod(lock.fileno(), 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def atomic_json(path, value):
@@ -186,6 +202,10 @@ class LocalModels:
             raise
 
     def chat(self, name, messages):
+        with inference_lock(self.config.get('inference_lock_file')):
+            return self._chat(name, messages)
+
+    def _chat(self, name, messages):
         profile = self.config['profiles'][name]
         if self.config['unload_other_profiles']:
             for other_name, other in self.config['profiles'].items():

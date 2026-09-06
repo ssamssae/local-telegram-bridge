@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 import urllib.error
@@ -70,6 +71,51 @@ class BridgeTests(unittest.TestCase):
             'id': 'callback-' + str(number), 'data': data, 'from': {'id': sender},
             'message': {'message_id': 100, 'from': {'id': 777, 'is_bot': True},
                         'chat': {'id': chat, 'type': kind}}}}
+
+    def test_shared_inference_lock_serializes_clients_and_releases_after_failure(self):
+        self.config['inference_lock_file'] = str(Path(self.tmp.name) / 'inference.lock')
+        first, second = lb.LocalModels(self.config), lb.LocalModels(self.config)
+        entered, release, waiting, second_entered = [threading.Event() for _ in range(4)]
+        errors = []
+
+        def first_inference(*args):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError('Test did not release first inference')
+            raise lb.BridgeError('Simulated backend failure')
+
+        def second_inference(*args):
+            second_entered.set()
+            return 'answer'
+
+        first._chat, second._chat = first_inference, second_inference
+
+        def run_first():
+            try:
+                first.chat('20b', [])
+            except lb.BridgeError as error:
+                errors.append(str(error))
+
+        def run_second():
+            waiting.set()
+            second.chat('qwen', [])
+
+        a, b = threading.Thread(target=run_first), threading.Thread(target=run_second)
+        a.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            b.start()
+            self.assertTrue(waiting.wait(2))
+            self.assertFalse(second_entered.wait(0.1))
+        finally:
+            release.set()
+            a.join(3)
+            if b.ident is not None:
+                b.join(3)
+        self.assertFalse(a.is_alive() or b.is_alive())
+        self.assertTrue(second_entered.is_set())
+        self.assertEqual(['Simulated backend failure'], errors)
+        self.assertEqual(0o600, Path(self.config['inference_lock_file']).stat().st_mode & 0o777)
 
     def test_model_command_sends_buttons_without_switching_or_loading(self):
         self.submit(1, '/model')
