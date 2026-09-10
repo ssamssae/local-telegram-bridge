@@ -351,6 +351,23 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual('OK', models.chat('qwen', []))
         self.assertEqual([('release', 'test-20b'), ('load', 'test-qwen')], events)
 
+    def test_mask_secrets_keeps_filename_hides_assignment(self):
+        out = lb.mask_secrets('see token.json token=abc')
+        self.assertIn('token.json', out)
+        self.assertNotIn('token=abc', out)
+        self.assertIn('token=<redacted>', out)
+
+    def test_terminal_delivery_masks_password_keeps_prefix_and_reply(self):
+        dummy = type('B', (), {})()
+        dummy._request_deliveries = lb.Bridge._request_deliveries.__get__(dummy, lb.Bridge)
+        rows = dummy._request_deliveries(
+            {'source': 'terminal', 'kind': 'user', 'content': 'password="two words"'},
+            'ok',
+        )
+        self.assertTrue(rows[0].startswith('[Terminal]\n'))
+        self.assertNotIn('two words', rows[0])
+        self.assertEqual(rows[-1], 'ok')
+
 
 if __name__ == '__main__':
     unittest.main()

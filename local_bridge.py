@@ -70,6 +70,29 @@ def json_request(url, payload=None, timeout=30, headers=None):
         raise BridgeError('Connection failed or invalid JSON response') from None
 
 
+def mask_secrets(text):
+    """Hide assignment/JSON secret values. Keep names like token.json."""
+    raw = text or ""
+    raw = re.sub(r"\b\d{8,12}:[A-Za-z0-9_-]{20,}\b", "<redacted-token>", raw)
+    raw = re.sub(r"\bsk-[A-Za-z0-9][-A-Za-z0-9]{8,}\b", "<redacted-key>", raw)
+    raw = re.sub(
+        r'(?i)("(?:api[_-]?key|password|passwd|secret|token|otp|비밀번호)"\s*:\s*")([^"]*)(")',
+        r"\1<redacted>\3",
+        raw,
+    )
+    raw = re.sub(
+        r"(?i)(?:api[_-]?key|passwd|password|secret|(?<![A-Za-z0-9_.-])token|otp)\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|\S+)",
+        lambda m: re.sub(r"[:=]\s*.*$", "=<redacted>", m.group(0)),
+        raw,
+    )
+    raw = re.sub(
+        r"(비밀번호|비번|인증번호|인증\s*코드)\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\n]+)",
+        lambda m: f"{m.group(1)}=<redacted>",
+        raw,
+    )
+    return raw
+
+
 def split_message(text, limit=3800):
     """Stay below Telegram's limit even when text contains UTF-16 surrogate pairs."""
     parts, current, units = [], [], 0
@@ -363,7 +386,7 @@ class Bridge:
         rows = []
         if request['source'] == 'terminal':
             shown = '/clear' if request['kind'] == 'clear' else request['content']
-            rows.extend(split_message('[Terminal]\n' + shown))
+            rows.extend(split_message('[Terminal]\n' + mask_secrets(shown)))
         rows.extend(split_message(reply))
         return rows
 
