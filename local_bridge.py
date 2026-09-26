@@ -62,7 +62,10 @@ def json_request(url, payload=None, timeout=30, headers=None):
         'Content-Type': 'application/json', **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            return json.load(response)
+            result = json.load(response)
+            if not isinstance(result, dict):
+                raise BridgeError('Invalid response: expected a JSON object')
+            return result
     except urllib.error.HTTPError as error:
         raise BridgeError('HTTP ' + str(error.code)) from None
     except (OSError, ValueError):
@@ -260,15 +263,20 @@ class LocalModels:
                 'model': profile['model'], 'messages': messages, 'stream': False,
                 'max_tokens': self.config['max_tokens'], 'temperature': 0.2}, timeout=300)
             choices = data.get('choices') or []
-            text = (choices[0].get('message', {}).get('content') or '') if choices else ''
+            if not isinstance(choices, list) or (choices and not isinstance(choices[0], dict)):
+                raise BridgeError('Invalid model response')
+            message = choices[0].get('message') if choices else {}
         else:
             data = json_request(url + '/api/chat', {
                 'model': profile['model'], 'messages': messages, 'stream': False,
                 'keep_alive': str(profile.get('ttl_seconds', 60)) + 's',
                 'options': {'num_ctx': profile.get('context_length', 4096),
                             'num_predict': self.config['max_tokens'], 'temperature': 0.2}}, timeout=300)
-            text = (data.get('message') or {}).get('content') or ''
-        if not text.strip():
+            message = data.get('message')
+        if not isinstance(message, dict):
+            raise BridgeError('Invalid model response')
+        text = message.get('content')
+        if not isinstance(text, str) or not text.strip():
             raise BridgeError('Model returned no answer; try a shorter question or /clear')
         return text.strip()
 

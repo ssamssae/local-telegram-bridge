@@ -12,6 +12,7 @@ import termios
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 import local_bridge as lb
 
@@ -56,6 +57,25 @@ class RuntimeRegressionTests(unittest.TestCase):
     def message(self, update_id, text):
         return {'update_id': update_id, 'message': {'text': text,
                 'from': {'id': 42}, 'chat': {'id': 42, 'type': 'private'}}}
+
+    def test_malformed_answer_does_not_replay_or_block_next_request(self):
+        self.bridge.models = lb.LocalModels(dict(self.config, unload_other_profiles=False))
+        with patch.object(self.bridge.models, 'ensure_lmstudio'), patch(
+                'local_bridge.json_request', side_effect=[
+                    {'choices': [{'message': {'content': ['invalid']}}]},
+                    {'choices': [{'message': {'content': 'valid answer'}}]}]) as request:
+            self.bridge.handle(self.message(1, 'first question'))
+            self.bridge.flush()
+            self.assertEqual([], self.bridge.store.history('qwen'))
+            self.assertIn('응답 실패', self.telegram.sent[-1])
+            self.bridge.handle(self.message(2, 'second question'))
+            self.bridge.flush()
+            self.assertEqual(2, request.call_count)
+            self.assertEqual('second question', self.bridge.store.history('qwen')[0]['content'])
+            self.assertEqual('valid answer', self.bridge.store.history('qwen')[1]['content'])
+            restored = lb.Bridge(self.config, self.telegram, self.bridge.models)
+            self.assertFalse(restored.process_pending())
+            self.assertEqual(2, request.call_count)
 
     def test_restart_after_clear_commit_before_json_snapshot(self):
         self.bridge.handle(self.message(1, 'old history'))

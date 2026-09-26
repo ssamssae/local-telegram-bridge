@@ -165,3 +165,5 @@ Tests cover inference-lock coordination, owner-only access, model separation, sh
 ## License
 
 MIT. Model weights and third-party applications retain their own licenses.
+
+Failure recovery checks: [response recovery verification](docs/feature-map.md).
